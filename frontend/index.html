@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="HummusLink">
+    <meta name="theme-color" content="#ff4444">
+    <meta name="description" content="Sync files, clipboard, and more between your PC and phone">
+
+    <title>HummusLink</title>
+
+    <!-- PWA -->
+    <link rel="manifest" href="/manifest.json">
+    <link rel="apple-touch-icon" href="/api/icon/192">
+    <link rel="icon" type="image/png" sizes="192x192" href="/api/icon/192">
+
+    <!-- Styles -->
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+    <!-- Toast notifications -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Header -->
+    <header class="header">
+        <div class="header-title">HummusLink</div>
+        <div class="header-status">
+            <span id="device-count">0</span>
+            <div id="status-dot" class="status-dot"></div>
+        </div>
+    </header>
+
+    <!-- Main content -->
+    <main class="content">
+
+        <!-- Share Tab -->
+        <div id="tab-share" class="tab-content active">
+            <textarea id="share-input" class="text-input" placeholder="Type or paste something..." rows="4"></textarea>
+            <button class="btn btn-primary" onclick="app.sendShareInput()" style="margin-top:12px">Send to PC</button>
+
+            <div class="section-title">Activity</div>
+            <div id="share-feed" class="feed">
+                <div class="empty-state">
+                    <div class="empty-state-icon">&#128228;</div>
+                    <div class="empty-state-text">No activity yet.<br>Share something to get started!</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Files Tab -->
+        <div id="tab-files" class="tab-content">
+            <div id="upload-area" class="upload-area">
+                <div style="font-size:32px;opacity:0.5">&#128229;</div>
+                <p>Tap to upload or drag files here</p>
+            </div>
+            <div class="btn-row">
+                <button class="btn btn-secondary" onclick="app.triggerFileUpload()">Upload File</button>
+                <button class="btn btn-secondary" onclick="app.triggerCameraUpload()">Take Photo</button>
+            </div>
+
+            <!-- Hidden file inputs -->
+            <input type="file" id="file-input" class="hidden-input" multiple>
+            <input type="file" id="camera-input" class="hidden-input" accept="image/*" capture="environment">
+
+            <div class="section-title">Recent Files</div>
+            <div id="file-list">
+                <div class="empty-state">
+                    <div class="empty-state-icon">&#128193;</div>
+                    <div class="empty-state-text">No files yet.<br>Upload or transfer files to see them here.</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Clipboard Tab -->
+        <div id="tab-clipboard" class="tab-content">
+            <div class="card-title">PC Clipboard</div>
+            <div id="clipboard-content" class="clipboard-card">
+                <div class="clipboard-empty">Clipboard is empty</div>
+            </div>
+            <div class="btn-row">
+                <button class="btn btn-secondary" onclick="app.copyPCClipboard()">Copy</button>
+                <button class="btn btn-primary" onclick="app.sendClipboardToPC()">Send Phone Clipboard to PC</button>
+            </div>
+
+            <div class="section-title">Clipboard History</div>
+            <div id="clipboard-history">
+                <div class="empty-state"><div class="empty-state-text">No clipboard history</div></div>
+            </div>
+        </div>
+
+        <!-- Settings Tab -->
+        <div id="tab-settings" class="tab-content">
+            <div class="section-title">Device</div>
+            <div class="setting-group">
+                <div class="setting-item">
+                    <span class="setting-label">Device Name</span>
+                    <input type="text" id="device-name-input" class="setting-input"
+                           value="iPhone" placeholder="My Phone">
+                </div>
+                <div class="setting-item">
+                    <span class="setting-label">Connection</span>
+                    <span id="settings-connection" class="setting-value">Disconnected</span>
+                </div>
+                <div class="setting-item">
+                    <span class="setting-label">Server</span>
+                    <span class="setting-value" id="settings-server">--</span>
+                </div>
+            </div>
+
+            <div class="section-title">Paired Devices</div>
+            <div class="setting-group" id="settings-devices">
+                <div class="setting-item">
+                    <span class="setting-label" style="color:var(--text-muted)">No devices connected</span>
+                </div>
+            </div>
+
+            <div class="section-title">Storage</div>
+            <div class="setting-group">
+                <div class="setting-item">
+                    <span class="setting-label">Usage</span>
+                    <span class="setting-value" id="settings-storage">0 MB (0 files)</span>
+                </div>
+            </div>
+
+            <button class="btn btn-secondary" style="margin-top:20px;width:100%;color:var(--danger)"
+                    onclick="if(confirm('Disconnect from server?')){location.reload()}">
+                Disconnect
+            </button>
+
+            <div style="text-align:center;margin-top:32px;color:var(--text-muted);font-size:12px">
+                HummusLink v0.1.0<br>
+                By Hummus Development LLC
+            </div>
+        </div>
+
+    </main>
+
+    <!-- Bottom Tab Bar -->
+    <nav class="tab-bar">
+        <button class="tab-btn active" data-tab="share">
+            <svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"/></svg>
+            Share
+        </button>
+        <button class="tab-btn" data-tab="files">
+            <svg viewBox="0 0 24 24"><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/></svg>
+            Files
+        </button>
+        <button class="tab-btn" data-tab="clipboard">
+            <svg viewBox="0 0 24 24"><path d="M19 2h-4.18C14.4.84 13.3 0 12 0c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm7 18H5V4h2v3h10V4h2v16z"/></svg>
+            Clipboard
+        </button>
+        <button class="tab-btn" data-tab="settings">
+            <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 00-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+            Settings
+        </button>
+    </nav>
+
+    <!-- App Script -->
+    <script src="/app.js"></script>
+
+    <!-- Inline script to populate settings with server info -->
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const serverEl = document.getElementById('settings-server');
+            if (serverEl) serverEl.textContent = location.host;
+            const nameInput = document.getElementById('device-name-input');
+            if (nameInput) {
+                const saved = localStorage.getItem('hummuslink_device_name');
+                if (saved) nameInput.value = saved;
+            }
+        });
+    </script>
+</body>
+</html>
