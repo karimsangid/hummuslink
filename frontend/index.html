@@ -6,7 +6,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="HummusLink">
-    <meta name="theme-color" content="#ff4444">
+    <meta name="theme-color" content="#d9a14a">
     <meta name="description" content="Sync files, clipboard, and more between your PC and phone">
 
     <title>HummusLink</title>
@@ -39,7 +39,7 @@
         <!-- Share Tab -->
         <div id="tab-share" class="tab-content active">
             <textarea id="share-input" class="text-input" placeholder="Type or paste something..." rows="4"></textarea>
-            <button class="btn btn-primary" onclick="app.sendShareInput()" style="margin-top:12px">Send to PC</button>
+            <button class="btn btn-primary" onclick="app.sendShareInput()" style="margin-top:12px" id="share-send-btn">Send</button>
 
             <div class="section-title">Activity</div>
             <div id="share-feed" class="feed">
@@ -76,13 +76,13 @@
 
         <!-- Clipboard Tab -->
         <div id="tab-clipboard" class="tab-content">
-            <div class="card-title">PC Clipboard</div>
+            <div class="card-title" id="clipboard-title">Remote Clipboard</div>
             <div id="clipboard-content" class="clipboard-card">
                 <div class="clipboard-empty">Clipboard is empty</div>
             </div>
             <div class="btn-row">
                 <button class="btn btn-secondary" onclick="app.copyPCClipboard()">Copy</button>
-                <button class="btn btn-primary" onclick="app.sendClipboardToPC()">Send Phone Clipboard to PC</button>
+                <button class="btn btn-primary" onclick="app.sendClipboardToPC()" id="clipboard-send-btn">Send Clipboard</button>
             </div>
 
             <div class="section-title">Clipboard History</div>
@@ -173,5 +173,6 @@
             }
         });
     </script>
+    <div style="text-align:center;padding:8px 0 14px;font-size:10px;opacity:0.35;letter-spacing:0.04em;">Created by Hummus Development &middot; 2026</div>
 </body>
 </html>
