@@ -24,6 +24,9 @@
     <!-- Toast notifications -->
     <div id="toast-container" class="toast-container"></div>
 
+    <!-- Upload progress cards (sticky, multiple files stack) -->
+    <div id="upload-progress-container" class="upload-progress-container"></div>
+
     <!-- Header -->
     <header class="header">
         <div class="header-title">HummusLink</div>
@@ -131,7 +134,7 @@
             </button>
 
             <div style="text-align:center;margin-top:32px;color:var(--text-muted);font-size:12px">
-                HummusLink v0.1.0<br>
+                HummusLink v0.2.1<br>
                 By Hummus Development LLC
             </div>
         </div>
@@ -157,6 +160,21 @@
             Settings
         </button>
     </nav>
+
+    <!-- File preview modal -->
+    <div id="preview-modal" class="preview-modal hidden">
+        <div class="preview-backdrop" onclick="app.closePreview()"></div>
+        <div class="preview-sheet">
+            <div class="preview-header">
+                <span id="preview-title" class="preview-title"></span>
+                <div class="preview-controls">
+                    <button class="preview-btn" onclick="app.saveFile()">Save</button>
+                    <button class="preview-btn preview-btn-close" onclick="app.closePreview()" aria-label="Close">&#10005;</button>
+                </div>
+            </div>
+            <div id="preview-body" class="preview-body"></div>
+        </div>
+    </div>
 
     <!-- App Script -->
     <script src="/app.js"></script>
