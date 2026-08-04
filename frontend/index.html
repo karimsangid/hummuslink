@@ -61,14 +61,19 @@
             </div>
             <div class="btn-row">
                 <button class="btn btn-secondary" onclick="app.triggerFileUpload()">Upload File</button>
-                <button class="btn btn-secondary" onclick="app.triggerCameraUpload()">Take Photo</button>
+                <button class="btn btn-secondary" onclick="app.triggerCameraUpload()">Camera</button>
             </div>
 
             <!-- Hidden file inputs -->
             <input type="file" id="file-input" class="hidden-input" multiple>
-            <input type="file" id="camera-input" class="hidden-input" accept="image/*" capture="environment">
+            <input type="file" id="camera-input" class="hidden-input" accept="image/*,video/*" capture="environment">
 
-            <div class="section-title">Recent Files</div>
+            <div class="section-title section-title-row">
+                <span>Recent Files</span>
+                <button class="mini-btn" id="select-toggle" onclick="app.toggleSelectionMode()">Select</button>
+            </div>
+            <input type="search" id="file-search" class="file-search" placeholder="Search files..." autocomplete="off">
+            <div id="select-bar-container"></div>
             <div id="file-list">
                 <div class="empty-state">
                     <div class="empty-state-icon">&#128193;</div>
@@ -127,6 +132,10 @@
                     <span class="setting-value" id="settings-storage">0 MB (0 files)</span>
                 </div>
             </div>
+            <button class="btn btn-secondary" style="margin-top:12px;width:100%"
+                    onclick="app.clearUnpinned()">
+                Delete All Unpinned Files
+            </button>
 
             <button class="btn btn-secondary" style="margin-top:20px;width:100%;color:var(--danger)"
                     onclick="if(confirm('Disconnect from server?')){location.reload()}">
@@ -134,7 +143,7 @@
             </button>
 
             <div style="text-align:center;margin-top:32px;color:var(--text-muted);font-size:12px">
-                HummusLink v0.2.1<br>
+                HummusLink v0.4.0<br>
                 By Hummus Development LLC
             </div>
         </div>
@@ -168,6 +177,8 @@
             <div class="preview-header">
                 <span id="preview-title" class="preview-title"></span>
                 <div class="preview-controls">
+                    <button class="preview-btn" id="preview-reveal-btn" onclick="app.revealFile()" style="display:none">Reveal</button>
+                    <button class="preview-btn" id="preview-pin-btn" onclick="app.togglePin()">Pin</button>
                     <button class="preview-btn" onclick="app.saveFile()">Save</button>
                     <button class="preview-btn preview-btn-close" onclick="app.closePreview()" aria-label="Close">&#10005;</button>
                 </div>

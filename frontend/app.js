@@ -18,7 +18,10 @@ class HummusLink {
         this.clipboard = '';
         this.clipboardHistory = [];
         this.files = [];
-        this.sharedItems = JSON.parse(localStorage.getItem('hummuslink_shared') || '[]');
+        this.feedItems = [];
+        this.selectionMode = false;
+        this.selected = new Set();
+        this.fileQuery = '';
         this.currentTab = 'share';
 
         // Persist device ID
@@ -58,6 +61,7 @@ class HummusLink {
         this.registerServiceWorker();
         this.fetchClipboard();
         this.fetchFiles();
+        this.fetchFeed();
         this.checkForUpdate(); // baseline the running build, then watch for new ones
     }
 
@@ -173,18 +177,16 @@ class HummusLink {
                 this.clipboard = data.content || '';
                 this.addToClipboardHistory(data.content, data.from || 'pc');
                 this.renderClipboardTab();
-                this.addFeedItem('clipboard', data.content, `From ${this.targetLabel}`);
                 break;
 
             case 'text_share':
-                this.addFeedItem('text', data.content, `From ${this.targetLabel}`);
                 this.showToast(`Text received from ${this.targetLabel}`);
-                this.renderShareTab();
+                this.fetchFeed();
                 break;
 
             case 'file_ready':
-                this.addFeedItem('file', data.filename, `From ${this.targetLabel}`, data.url);
                 this.showToast(`File received: ${data.filename}`);
+                this.fetchFeed();
                 this.fetchFiles();
                 break;
 
@@ -223,12 +225,15 @@ class HummusLink {
             content: text.trim(),
             from: this.deviceId,
         });
-        this.addFeedItem('text', text.trim(), `To ${this.targetLabel}`);
         this.showToast(`Sent to ${this.targetLabel}`, 'success');
+        // Server records it in the feed while handling the WS message.
+        setTimeout(() => this.fetchFeed(), 400);
     }
 
     async uploadFile(file) {
         if (!file) return;
+        // Big files go chunked: survives iOS suspending the PWA mid-transfer.
+        if (file.size > 12 * 1024 * 1024) return this.uploadFileChunked(file);
         const progressId = `up_${Math.random().toString(36).substr(2, 9)}`;
         this.showUploadProgress(progressId, file.name, file.size);
 
@@ -273,7 +278,96 @@ class HummusLink {
             });
 
             this.completeUploadProgress(progressId, true, meta.filename);
-            this.addFeedItem('file', meta.filename, `To ${this.targetLabel}`, meta.url);
+            this.fetchFeed();
+            this.fetchFiles();
+        } catch (e) {
+            this.completeUploadProgress(progressId, false, e.message);
+        }
+    }
+
+    // Chunked, resumable upload. If the transfer dies (screen lock, app switch,
+    // network blip) re-sending the same file resumes from the last good chunk.
+    async uploadFileChunked(file) {
+        const progressId = `up_${Math.random().toString(36).substr(2, 9)}`;
+        this.showUploadProgress(progressId, file.name, file.size);
+        const resumeKey = `hlup_${file.name}_${file.size}_${file.lastModified}`;
+        let lastTime = Date.now();
+        let smoothedSpeed = 0;
+
+        try {
+            let uploadId = localStorage.getItem(resumeKey);
+            let chunkSize = 4 * 1024 * 1024;
+            let totalChunks = 0;
+            const received = new Set();
+
+            if (uploadId) {
+                const r = await fetch(`/api/upload/status/${uploadId}`, { cache: 'no-store' });
+                if (r.ok) {
+                    const s = await r.json();
+                    chunkSize = s.chunk_size;
+                    totalChunks = s.total_chunks;
+                    (s.received || []).forEach(i => received.add(i));
+                } else {
+                    uploadId = null;
+                    localStorage.removeItem(resumeKey);
+                }
+            }
+            if (!uploadId) {
+                const r = await fetch('/api/upload/init', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filename: file.name, size: file.size, from_device: this.deviceId }),
+                });
+                if (!r.ok) throw new Error(`Upload init failed (${r.status})`);
+                const d = await r.json();
+                uploadId = d.upload_id;
+                chunkSize = d.chunk_size;
+                totalChunks = d.total_chunks;
+                localStorage.setItem(resumeKey, uploadId);
+            }
+
+            for (let i = 0; i < totalChunks; i++) {
+                if (received.has(i)) continue;
+                const blob = file.slice(i * chunkSize, Math.min((i + 1) * chunkSize, file.size));
+                let attempt = 0;
+                for (;;) {
+                    try {
+                        const r = await fetch(`/api/upload/chunk/${uploadId}/${i}`, { method: 'POST', body: blob });
+                        if (r.status === 404) {
+                            localStorage.removeItem(resumeKey);
+                            throw new Error('Upload session expired - send again to restart');
+                        }
+                        if (!r.ok) throw new Error(`Chunk failed (${r.status})`);
+                        break;
+                    } catch (e) {
+                        if ((e.message || '').startsWith('Upload session expired')) throw e;
+                        attempt++;
+                        if (attempt >= 5) throw e;
+                        await new Promise(res => setTimeout(res, 1000 * attempt));
+                    }
+                }
+                received.add(i);
+                const loaded = Math.min(received.size * chunkSize, file.size);
+                const now = Date.now();
+                const dt = (now - lastTime) / 1000;
+                if (dt > 0) {
+                    const inst = blob.size / dt;
+                    smoothedSpeed = smoothedSpeed ? smoothedSpeed * 0.6 + inst * 0.4 : inst;
+                    lastTime = now;
+                }
+                this.updateUploadProgress(progressId, loaded, file.size, smoothedSpeed);
+            }
+
+            const fin = await fetch(`/api/upload/complete/${uploadId}`, { method: 'POST' });
+            if (!fin.ok) {
+                let msg = `Finalize failed (${fin.status})`;
+                try { msg = (await fin.json()).error || msg; } catch (e) {}
+                throw new Error(msg);
+            }
+            const meta = await fin.json();
+            localStorage.removeItem(resumeKey);
+            this.completeUploadProgress(progressId, true, meta.filename);
+            this.fetchFeed();
             this.fetchFiles();
         } catch (e) {
             this.completeUploadProgress(progressId, false, e.message);
@@ -363,7 +457,7 @@ class HummusLink {
 
     async fetchFiles() {
         try {
-            const resp = await fetch('/api/files');
+            const resp = await fetch('/api/files?limit=200');
             if (resp.ok) {
                 const data = await resp.json();
                 this.files = data.files || [];
@@ -374,13 +468,26 @@ class HummusLink {
         }
     }
 
+    async fetchFeed() {
+        try {
+            const resp = await fetch('/api/feed');
+            if (resp.ok) {
+                const data = await resp.json();
+                this.feedItems = data.feed || [];
+                if (this.currentTab === 'share') this.renderShareTab();
+            }
+        } catch (e) {
+            console.error('Failed to fetch feed:', e);
+        }
+    }
+
     // ==================== UI Rendering ====================
 
     renderShareTab() {
         const container = document.getElementById('share-feed');
         if (!container) return;
 
-        if (this.sharedItems.length === 0) {
+        if (this.feedItems.length === 0) {
             container.innerHTML = `
                 <div class="empty-state">
                     <div class="empty-state-icon">&#128228;</div>
@@ -389,19 +496,26 @@ class HummusLink {
             return;
         }
 
-        container.innerHTML = this.sharedItems.slice(0, 50).map((item, i) => {
-            const isFile = item.type === 'file' && item.url;
-            const action = isFile
-                ? `onclick="window.open('${item.url}', '_blank')"`
-                : `onclick="app.copyFeedItem(${i})"`;
-            const hint = isFile ? 'Tap to download' : 'Tap to copy';
+        container.innerHTML = this.feedItems.map((item, i) => {
+            const isFile = item.kind === 'file';
+            const available = !isFile || item.available !== false;
+            let action = '';
+            let hint = '';
+            if (isFile && available) {
+                action = `onclick="app.openPreview('${item.file_id}', '${this.escapeAttr(item.content)}')"`;
+                hint = 'Tap to open';
+            } else if (!isFile) {
+                action = `onclick="app.copyFeedItem(${i})"`;
+                hint = 'Tap to copy';
+            }
+            const expired = isFile && !available ? ' <span class="feed-expired">(expired)</span>' : '';
             return `
-            <div class="feed-item clickable" ${action} title="${hint}">
-                <div class="feed-icon">${this.getFeedIcon(item.type)}</div>
+            <div class="feed-item${action ? ' clickable' : ''}" ${action} title="${hint}">
+                <div class="feed-icon">${this.getFeedIcon(item.kind)}</div>
                 <div class="feed-body">
-                    <div class="feed-text">${this.escapeHtml(item.preview)}</div>
+                    <div class="feed-text">${this.escapeHtml(item.content)}${expired}</div>
                     <div class="feed-meta">
-                        <span class="feed-direction">${item.direction}</span>
+                        <span class="feed-direction">${this.feedDirection(item.from_device)}</span>
                         <span>${this.timeAgo(item.timestamp)}</span>
                     </div>
                 </div>
@@ -410,30 +524,168 @@ class HummusLink {
         }).join('');
     }
 
+    feedDirection(from) {
+        if (!from) return '';
+        if (from === this.deviceId) return 'Sent';
+        if (from.startsWith('phone')) return 'From Phone';
+        if (from.startsWith('agent')) return 'From Agent';
+        if (from.startsWith('ios-shortcut')) return 'From Shortcut';
+        if (from.startsWith('share-target')) return 'Shared';
+        if (from.startsWith('pc')) return 'From PC';
+        return 'From ' + from;
+    }
+
     renderFilesTab() {
         const container = document.getElementById('file-list');
         if (!container) return;
 
-        if (this.files.length === 0) {
+        const selBtn = document.getElementById('select-toggle');
+        if (selBtn) selBtn.textContent = this.selectionMode ? 'Done' : 'Select';
+        this.renderSelectBar();
+
+        const q = this.fileQuery.trim().toLowerCase();
+        const shown = q
+            ? this.files.filter(f => (f.filename || '').toLowerCase().includes(q))
+            : this.files;
+
+        if (shown.length === 0) {
             container.innerHTML = `
                 <div class="empty-state">
                     <div class="empty-state-icon">&#128193;</div>
-                    <div class="empty-state-text">No files yet.<br>Upload or transfer files to see them here.</div>
+                    <div class="empty-state-text">${q ? 'No files match your search.' : 'No files yet.<br>Upload or transfer files to see them here.'}</div>
                 </div>`;
             return;
         }
 
-        container.innerHTML = `<div class="file-grid">${this.files.map(f => {
+        container.innerHTML = `<div class="file-grid">${shown.map(f => {
             const thumb = f.thumb_url
                 ? `<img src="${f.thumb_url}" alt="${this.escapeHtml(f.filename)}" loading="lazy">`
                 : this.getFileIcon(f.filename);
+            const ext = (f.filename || '').split('.').pop().toLowerCase();
+            const playBadge = ['mp4', 'mov', 'm4v', 'webm', 'avi', 'mkv'].includes(ext)
+                ? '<div class="file-play-badge">&#9654;</div>'
+                : '';
+            const pinBadge = f.pinned ? '<div class="file-pin-badge">&#128204;</div>' : '';
+            const checked = this.selected.has(f.file_id);
+            const check = this.selectionMode
+                ? `<div class="file-check${checked ? ' on' : ''}">${checked ? '&#10003;' : ''}</div>`
+                : '';
+            const onclick = this.selectionMode
+                ? `app.toggleSelect('${f.file_id}')`
+                : `app.openPreview('${f.file_id}', '${this.escapeAttr(f.filename)}')`;
             return `
-            <div class="file-card" onclick="app.openPreview('${f.file_id}', '${this.escapeAttr(f.filename)}')">
-                <div class="file-thumb">${thumb}</div>
+            <div class="file-card${checked ? ' selected' : ''}" onclick="${onclick}">
+                <div class="file-thumb">${thumb}${playBadge}${pinBadge}${check}</div>
                 <div class="file-name">${this.escapeHtml(f.filename)}</div>
                 <div class="file-size">${this.formatSize(f.size)}</div>
             </div>`;
         }).join('')}</div>`;
+    }
+
+    renderSelectBar() {
+        const bar = document.getElementById('select-bar-container');
+        if (!bar) return;
+        if (!this.selectionMode) {
+            bar.innerHTML = '';
+            return;
+        }
+        const n = this.selected.size;
+        bar.innerHTML = `
+            <div class="select-bar">
+                <span class="select-bar-count">${n} selected</span>
+                <button class="btn btn-secondary select-bar-btn" onclick="app.downloadSelectedZip()" ${n ? '' : 'disabled'}>Zip</button>
+                <button class="btn btn-secondary select-bar-btn select-bar-danger" onclick="app.deleteSelected()" ${n ? '' : 'disabled'}>Delete</button>
+            </div>`;
+    }
+
+    toggleSelectionMode() {
+        this.selectionMode = !this.selectionMode;
+        this.selected.clear();
+        this.renderFilesTab();
+    }
+
+    toggleSelect(fileId) {
+        if (this.selected.has(fileId)) this.selected.delete(fileId);
+        else this.selected.add(fileId);
+        this.renderFilesTab();
+    }
+
+    async downloadSelectedZip() {
+        if (!this.selected.size) return;
+        if (this.selected.size === 1) {
+            const id = [...this.selected][0];
+            const f = this.files.find(x => x.file_id === id);
+            return this.saveUrl(`/api/files/${id}`, f ? f.filename : 'file');
+        }
+        this.showToast('Building zip...', 'success');
+        await this.saveUrl(`/api/files/zip?ids=${[...this.selected].join(',')}`, 'hummuslink-files.zip');
+    }
+
+    async deleteSelected() {
+        if (!this.selected.size) return;
+        if (!confirm(`Delete ${this.selected.size} file(s)?`)) return;
+        for (const id of [...this.selected]) {
+            try { await fetch(`/api/files/${id}`, { method: 'DELETE' }); } catch (e) {}
+        }
+        this.selected.clear();
+        this.showToast('Deleted', 'success');
+        this.fetchFiles();
+    }
+
+    async togglePin() {
+        const pf = this._previewFile;
+        if (!pf) return;
+        const cur = this.files.find(x => x.file_id === pf.fileId);
+        const want = !(cur && cur.pinned);
+        try {
+            const r = await fetch(`/api/files/${pf.fileId}/pin`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pinned: want }),
+            });
+            if (!r.ok) throw new Error();
+            this.showToast(want ? 'Pinned - survives cleanup' : 'Unpinned', 'success');
+            await this.fetchFiles();
+            this.updatePinButton();
+        } catch (e) {
+            this.showToast('Pin failed', 'error');
+        }
+    }
+
+    updatePinButton() {
+        const btn = document.getElementById('preview-pin-btn');
+        if (!btn) return;
+        if (!this._previewFile) return;
+        const cur = this.files.find(x => x.file_id === this._previewFile.fileId);
+        btn.textContent = cur && cur.pinned ? 'Unpin' : 'Pin';
+        // The file already lives on this PC's disk — offer Explorer instead of a re-download.
+        const reveal = document.getElementById('preview-reveal-btn');
+        if (reveal) reveal.style.display = this.isPhone ? 'none' : '';
+    }
+
+    async revealFile() {
+        const pf = this._previewFile;
+        if (!pf) return;
+        try {
+            const r = await fetch(`/api/files/${pf.fileId}/reveal`, { method: 'POST' });
+            if (!r.ok) throw new Error();
+        } catch (e) {
+            this.showToast('Could not open Explorer', 'error');
+        }
+    }
+
+    async clearUnpinned() {
+        if (!confirm('Delete ALL unpinned files? Pinned files are kept.')) return;
+        try {
+            const r = await fetch('/api/files/clear-unpinned', { method: 'POST' });
+            if (!r.ok) throw new Error();
+            const d = await r.json();
+            this.showToast(`Deleted ${d.deleted} file(s)`, 'success');
+            this.fetchFiles();
+            this.renderSettingsTab();
+        } catch (e) {
+            this.showToast('Cleanup failed', 'error');
+        }
     }
 
     renderClipboardTab() {
@@ -558,9 +810,19 @@ class HummusLink {
     openPreview(fileId, filename) {
         const ext = (filename || '').split('.').pop().toLowerCase();
         const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif', 'bmp'];
+        const videoExts = ['mp4', 'mov', 'm4v', 'webm'];
+        const audioExts = ['mp3', 'wav', 'aac', 'm4a'];
         const isImage = imageExts.includes(ext);
+        const isVideo = videoExts.includes(ext);
+        const isAudio = audioExts.includes(ext);
         const isPdf = ext === 'pdf';
         const url = `/api/files/${fileId}`;
+
+        // Opening a second file without closing the first would otherwise leave
+        // the previous document's observers wired to detached nodes.
+        if (this._pdfObserver) { this._pdfObserver.disconnect(); this._pdfObserver = null; }
+        if (this._pdfPageObserver) { this._pdfPageObserver.disconnect(); this._pdfPageObserver = null; }
+        this._pdf = null;
 
         this._previewFile = { fileId, filename };
 
@@ -570,9 +832,22 @@ class HummusLink {
 
         if (isImage) {
             bodyEl.innerHTML = `<img class="preview-image" src="${url}" alt="${this.escapeHtml(filename)}">`;
+        } else if (isVideo) {
+            // playsinline keeps iOS from hijacking into the fullscreen player
+            bodyEl.innerHTML = `<video class="preview-video" src="${url}" controls playsinline preload="metadata"></video>`;
+        } else if (isAudio) {
+            bodyEl.innerHTML = `<div class="preview-audio-wrap">
+                <div class="preview-fallback-icon">&#127925;</div>
+                <audio class="preview-audio" src="${url}" controls preload="metadata"></audio>
+            </div>`;
         } else if (isPdf) {
-            // iframe keeps the PDF inline + scrollable; Close/Save are the escape hatches
-            bodyEl.innerHTML = `<iframe class="preview-frame" src="${url}" title="${this.escapeHtml(filename)}"></iframe>`;
+            // Server-rendered page images, NOT an iframe. iOS Safari in a
+            // standalone PWA renders an iframed PDF as page 1 only, unscrollable.
+            bodyEl.innerHTML = `<div class="pdf-loading">Opening PDF&hellip;</div>`;
+            this.openPdf(fileId, filename);
+        } else if (this.isTextExt(ext)) {
+            bodyEl.innerHTML = `<div class="pdf-loading">Loading&hellip;</div>`;
+            this.openText(fileId, filename);
         } else {
             bodyEl.innerHTML = `<div class="preview-fallback">
                 <div class="preview-fallback-icon">${this.getFileIcon(filename)}</div>
@@ -584,13 +859,187 @@ class HummusLink {
         const modal = document.getElementById('preview-modal');
         if (modal) modal.classList.remove('hidden');
         document.body.classList.add('modal-open');
+        this.updatePinButton();
+    }
+
+    isTextExt(ext) {
+        return [
+            'txt', 'md', 'markdown', 'json', 'csv', 'tsv', 'log', 'yml', 'yaml',
+            'ini', 'cfg', 'conf', 'toml', 'xml', 'html', 'htm', 'css', 'js',
+            'ts', 'tsx', 'jsx', 'py', 'sh', 'bat', 'ps1', 'sql', 'rs', 'go',
+            'java', 'c', 'h', 'cpp', 'rb', 'php', 'swift', 'kt', 'env', 'srt',
+        ].includes(ext);
+    }
+
+    // ==================== PDF quick view ====================
+    // Pages are rendered server-side (PyMuPDF) and streamed in as plain <img>.
+    // That behaves identically on iOS, Android and desktop, unlike an <iframe>,
+    // and lets us lazy-load so a 200-page deck doesn't stall the modal.
+
+    async openPdf(fileId, filename) {
+        const bodyEl = document.getElementById('preview-body');
+        let info;
+        try {
+            const r = await fetch(`/api/files/${fileId}/pdf`);
+            if (!r.ok) throw new Error('no renderer');
+            info = await r.json();
+        } catch (e) {
+            this.renderPdfFallback(fileId, filename);
+            return;
+        }
+        // Bail if the user closed or switched files while we were fetching.
+        if (!this._previewFile || this._previewFile.fileId !== fileId) return;
+
+        if (info.encrypted || !info.pages) {
+            this.renderPdfFallback(fileId, filename, info.encrypted
+                ? 'This PDF is password-protected.'
+                : 'This PDF has no readable pages.');
+            return;
+        }
+
+        // Pick a render width from the viewport, then let the server snap it to
+        // its ladder so we don't mint a new cache entry per device width.
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const target = Math.round((bodyEl.clientWidth || 800) * dpr);
+        const ladder = (info.widths || [1400]).slice().sort((a, b) => a - b);
+        // Round UP to the next rung: rounding to the *nearest* renders below the
+        // device's pixel density and small PDF type goes visibly soft.
+        const width = ladder.find(w => w >= target) || ladder[ladder.length - 1];
+
+        this._pdf = { fileId, pages: info.pages, width, current: 1 };
+
+        const pages = info.sizes.map((s, i) => {
+            // Reserve the exact aspect ratio up front so scrolling doesn't jump
+            // as images arrive.
+            const ratio = s.h && s.w ? (s.h / s.w) * 100 : 129.4;
+            return `<div class="pdf-page" data-page="${i}" style="padding-bottom:${ratio.toFixed(3)}%">
+                <div class="pdf-page-num">${i + 1}</div>
+            </div>`;
+        }).join('');
+
+        bodyEl.innerHTML = `
+            <div class="pdf-viewer" id="pdf-viewer">
+                <div class="pdf-pages">${pages}</div>
+                ${info.truncated ? `<div class="pdf-note">Showing the first ${info.pages} of ${info.total_pages} pages. Save the file to read the rest.</div>` : ''}
+            </div>
+            <div class="pdf-hud" id="pdf-hud">
+                <button class="pdf-hud-btn" onclick="app.pdfStep(-1)" aria-label="Previous page">&#8593;</button>
+                <span class="pdf-hud-count" id="pdf-hud-count">1 / ${info.pages}</span>
+                <button class="pdf-hud-btn" onclick="app.pdfStep(1)" aria-label="Next page">&#8595;</button>
+            </div>`;
+
+        this.mountPdfLazyLoad();
+    }
+
+    mountPdfLazyLoad() {
+        const viewer = document.getElementById('pdf-viewer');
+        if (!viewer || !this._pdf) return;
+        const { fileId, width, pages } = this._pdf;
+        const nodes = viewer.querySelectorAll('.pdf-page');
+
+        const load = (el) => {
+            if (el.dataset.loaded) return;
+            el.dataset.loaded = '1';
+            const n = Number(el.dataset.page);
+            const img = new Image();
+            img.className = 'pdf-page-img';
+            img.alt = `Page ${n + 1}`;
+            img.decoding = 'async';
+            img.onload = () => el.classList.add('ready');
+            img.onerror = () => {
+                el.dataset.loaded = '';
+                el.classList.add('failed');
+            };
+            img.src = `/api/files/${fileId}/pdf/${n}?w=${width}`;
+            el.appendChild(img);
+        };
+
+        // rootMargin pre-renders a screen ahead and behind so scrolling feels
+        // continuous rather than page-by-page pop-in.
+        this._pdfObserver = new IntersectionObserver((entries) => {
+            for (const e of entries) if (e.isIntersecting) load(e.target);
+        }, { root: viewer, rootMargin: '150% 0px' });
+        nodes.forEach(n => this._pdfObserver.observe(n));
+
+        // Separate observer purely for the "3 / 11" readout. Two pages are often
+        // on screen at once, so track every ratio and report the most-visible one
+        // rather than whichever callback happened to fire last.
+        const countEl = document.getElementById('pdf-hud-count');
+        const ratios = new Map();
+        this._pdfPageObserver = new IntersectionObserver((entries) => {
+            for (const e of entries) {
+                ratios.set(Number(e.target.dataset.page), e.intersectionRatio);
+            }
+            let bestPage = 0;
+            let bestRatio = -1;
+            for (const [p, r] of ratios) {
+                if (r > bestRatio + 0.001) { bestRatio = r; bestPage = p; }
+            }
+            const n = bestPage + 1;
+            this._pdf.current = n;
+            if (countEl) countEl.textContent = `${n} / ${pages}`;
+        }, { root: viewer, threshold: [0, 0.25, 0.5, 0.75, 1] });
+        nodes.forEach(n => this._pdfPageObserver.observe(n));
+
+        // Page 1 is always worth having immediately — don't wait for the observer.
+        if (nodes[0]) load(nodes[0]);
+    }
+
+    pdfStep(delta) {
+        if (!this._pdf) return;
+        const next = Math.min(Math.max(this._pdf.current + delta, 1), this._pdf.pages);
+        const viewer = document.getElementById('pdf-viewer');
+        const el = viewer && viewer.querySelector(`.pdf-page[data-page="${next - 1}"]`);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    renderPdfFallback(fileId, filename, reason) {
+        const bodyEl = document.getElementById('preview-body');
+        if (!bodyEl) return;
+        // No server-side renderer (or an unreadable file): hand it to the browser
+        // with an inline disposition, which at least works on desktop.
+        bodyEl.innerHTML = `
+            <div class="preview-fallback">
+                <div class="preview-fallback-icon">&#128196;</div>
+                <div>${this.escapeHtml(reason || "Can't render this PDF here.")}</div>
+                <div class="preview-fallback-sub">Open it in the browser, or Save to send it elsewhere.</div>
+                <a class="pdf-open-link" href="/api/files/${fileId}?inline=1" target="_blank" rel="noopener">Open PDF</a>
+            </div>`;
+    }
+
+    // ==================== Text quick view ====================
+
+    async openText(fileId, filename) {
+        const bodyEl = document.getElementById('preview-body');
+        try {
+            const r = await fetch(`/api/files/${fileId}/text`);
+            if (!r.ok) throw new Error('not text');
+            const data = await r.json();
+            if (!this._previewFile || this._previewFile.fileId !== fileId) return;
+            bodyEl.innerHTML = `
+                <div class="text-viewer">
+                    <pre class="text-viewer-pre">${this.escapeHtml(data.text)}</pre>
+                    ${data.truncated ? '<div class="pdf-note">Preview truncated. Save the file to read all of it.</div>' : ''}
+                </div>`;
+        } catch (e) {
+            if (!this._previewFile || this._previewFile.fileId !== fileId) return;
+            bodyEl.innerHTML = `<div class="preview-fallback">
+                <div class="preview-fallback-icon">${this.getFileIcon(filename)}</div>
+                <div>No inline preview for this file type.</div>
+                <div class="preview-fallback-sub">Tap Save to open or store it.</div>
+            </div>`;
+        }
     }
 
     closePreview() {
         const modal = document.getElementById('preview-modal');
         if (modal) modal.classList.add('hidden');
+        // Disconnect before clearing the DOM so the observers don't leak across opens.
+        if (this._pdfObserver) { this._pdfObserver.disconnect(); this._pdfObserver = null; }
+        if (this._pdfPageObserver) { this._pdfPageObserver.disconnect(); this._pdfPageObserver = null; }
+        this._pdf = null;
         const bodyEl = document.getElementById('preview-body');
-        if (bodyEl) bodyEl.innerHTML = ''; // stop the iframe/img from holding the file
+        if (bodyEl) bodyEl.innerHTML = ''; // stop the images/video from holding the file
         document.body.classList.remove('modal-open');
         this._previewFile = null;
     }
@@ -599,8 +1048,12 @@ class HummusLink {
         fileId = fileId || (this._previewFile && this._previewFile.fileId);
         filename = filename || (this._previewFile && this._previewFile.filename);
         if (!fileId) return;
+        await this.saveUrl(`/api/files/${fileId}`, filename);
+    }
+
+    async saveUrl(url, filename) {
         try {
-            const resp = await fetch(`/api/files/${fileId}`);
+            const resp = await fetch(url);
             if (!resp.ok) throw new Error('fetch failed');
             const blob = await resp.blob();
             const file = new File([blob], filename, { type: blob.type || 'application/octet-stream' });
@@ -680,33 +1133,17 @@ class HummusLink {
 
     // ==================== Helpers ====================
 
-    addFeedItem(type, preview, direction, url) {
-        const item = {
-            type,
-            preview: (preview || '').substring(0, 500),
-            direction,
-            url: url || null,
-            timestamp: new Date().toISOString(),
-        };
-        this.sharedItems.unshift(item);
-        if (this.sharedItems.length > 100) {
-            this.sharedItems = this.sharedItems.slice(0, 100);
-        }
-        localStorage.setItem('hummuslink_shared', JSON.stringify(this.sharedItems));
-        if (this.currentTab === 'share') this.renderShareTab();
-    }
-
     copyFeedItem(index) {
-        const item = this.sharedItems[index];
-        if (!item || !item.preview) return;
+        const item = this.feedItems[index];
+        if (!item || !item.content) return;
         if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(item.preview).then(() => {
+            navigator.clipboard.writeText(item.content).then(() => {
                 this.showToast('Copied to clipboard', 'success');
             }).catch(() => {
-                this.fallbackCopy(item.preview);
+                this.fallbackCopy(item.content);
             });
         } else {
-            this.fallbackCopy(item.preview);
+            this.fallbackCopy(item.content);
         }
     }
 
@@ -780,6 +1217,8 @@ class HummusLink {
         if (videoExts.includes(ext)) return '&#127910;';
         const audioExts = ['mp3', 'wav', 'aac', 'm4a'];
         if (audioExts.includes(ext)) return '&#127925;';
+        if (ext === 'pdf') return '&#128220;';
+        if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) return '&#128230;';
         return '&#128196;';
     }
 
@@ -832,6 +1271,12 @@ class HummusLink {
         document.getElementById('file-input')?.addEventListener('change', (e) => this.handleFileSelect(e));
         document.getElementById('camera-input')?.addEventListener('change', (e) => this.handleFileSelect(e));
 
+        // File search
+        document.getElementById('file-search')?.addEventListener('input', (e) => {
+            this.fileQuery = e.target.value || '';
+            this.renderFilesTab();
+        });
+
         // Upload area drag and drop
         const uploadArea = document.getElementById('upload-area');
         if (uploadArea) {
@@ -853,6 +1298,25 @@ class HummusLink {
             });
         }
 
+        // Paste a file/screenshot anywhere on the page to upload it (PC: Ctrl+V)
+        document.addEventListener('paste', (e) => {
+            const items = (e.clipboardData && e.clipboardData.items) || [];
+            let grabbed = false;
+            for (const it of items) {
+                if (it.kind !== 'file') continue;
+                const f = it.getAsFile();
+                if (!f) continue;
+                const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+                const name = (f.name && f.name !== 'image.png') ? f.name : `pasted-${ts}.png`;
+                this.uploadFile(new File([f], name, { type: f.type }));
+                grabbed = true;
+            }
+            if (grabbed) {
+                e.preventDefault();
+                if (this.currentTab !== 'files') this.switchTab('files');
+            }
+        });
+
         // Visibility change - reconnect when app comes back to foreground (critical for iOS)
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') {
@@ -864,6 +1328,7 @@ class HummusLink {
                 // Refresh data
                 this.fetchClipboard();
                 this.fetchFiles();
+                this.fetchFeed();
                 // Pull a newer build if one was deployed while backgrounded
                 this.checkForUpdate();
             }

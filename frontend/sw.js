@@ -1,74 +1,27 @@
 /**
- * HummusLink Service Worker
- * Caches the app shell for offline/PWA support.
- * Passes through API and WebSocket requests.
+ * HummusLink Service Worker — KILL SWITCH
+ * The previous SW was caching stale assets and breaking page loads on iPhone.
+ * This version self-unregisters, deletes every cache, and reloads any open
+ * clients so the next visit is a clean network fetch.
  */
 
-const CACHE_NAME = 'hummuslink-v1';
-const APP_SHELL = [
-    '/',
-    '/styles.css',
-    '/app.js',
-    '/manifest.json',
-];
-
-// Install: cache the app shell
 self.addEventListener('install', (event) => {
-    event.waitUntil(
-        caches.open(CACHE_NAME).then((cache) => {
-            return cache.addAll(APP_SHELL);
-        })
-    );
     self.skipWaiting();
 });
 
-// Activate: clean up old caches
 self.addEventListener('activate', (event) => {
-    event.waitUntil(
-        caches.keys().then((names) => {
-            return Promise.all(
-                names
-                    .filter((name) => name !== CACHE_NAME)
-                    .map((name) => caches.delete(name))
-            );
-        })
-    );
-    self.clients.claim();
+    event.waitUntil((async () => {
+        try {
+            const names = await caches.keys();
+            await Promise.all(names.map((n) => caches.delete(n)));
+        } catch (e) {}
+        try {
+            await self.registration.unregister();
+        } catch (e) {}
+    })());
 });
 
-// Fetch: serve from cache first, fall back to network
-// Always pass through API requests and WebSocket upgrades
+// Pass every request straight to the network — no caching, no interception.
 self.addEventListener('fetch', (event) => {
-    const url = new URL(event.request.url);
-
-    // Pass through API requests
-    if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/ws/')) {
-        return;
-    }
-
-    event.respondWith(
-        caches.match(event.request).then((cached) => {
-            if (cached) {
-                // Return cached, but also update cache in background
-                fetch(event.request).then((response) => {
-                    if (response && response.status === 200) {
-                        caches.open(CACHE_NAME).then((cache) => {
-                            cache.put(event.request, response);
-                        });
-                    }
-                }).catch(() => {});
-                return cached;
-            }
-            return fetch(event.request).then((response) => {
-                // Cache successful responses for app shell URLs
-                if (response && response.status === 200) {
-                    const responseClone = response.clone();
-                    caches.open(CACHE_NAME).then((cache) => {
-                        cache.put(event.request, responseClone);
-                    });
-                }
-                return response;
-            });
-        })
-    );
+    return;
 });

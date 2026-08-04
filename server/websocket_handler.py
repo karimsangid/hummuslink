@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from fastapi import WebSocket, WebSocketDisconnect
 
 from config import HEARTBEAT_INTERVAL
+from server import notify
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,8 @@ logger = logging.getLogger(__name__)
 class ConnectionManager:
     """Manages WebSocket connections and message routing between devices."""
 
-    def __init__(self):
+    def __init__(self, db=None):
+        self.db = db
         self.active_connections: dict[str, WebSocket] = {}
         self.paired_devices: dict[str, dict] = {}
         self._heartbeat_tasks: dict[str, asyncio.Task] = {}
@@ -23,7 +25,6 @@ class ConnectionManager:
     async def connect(
         self, websocket: WebSocket, device_id: str, device_name: str, device_type: str
     ):
-        """Accept a new WebSocket connection and register the device."""
         await websocket.accept()
         self.active_connections[device_id] = websocket
         self.paired_devices[device_id] = {
@@ -31,14 +32,14 @@ class ConnectionManager:
             "type": device_type,
             "paired_at": datetime.now(timezone.utc).isoformat(),
         }
+        if self.db is not None:
+            try:
+                self.db.upsert_device(device_id, device_name, device_type)
+            except Exception as e:
+                logger.warning(f"device persist failed: {e}")
+
         logger.info(f"Device connected: {device_name} ({device_id}) [{device_type}]")
-
-        # Start heartbeat for this connection
-        self._heartbeat_tasks[device_id] = asyncio.create_task(
-            self._heartbeat(device_id)
-        )
-
-        # Notify all other devices
+        self._heartbeat_tasks[device_id] = asyncio.create_task(self._heartbeat(device_id))
         await self.broadcast(
             {
                 "type": "device_connected",
@@ -50,7 +51,6 @@ class ConnectionManager:
         )
 
     async def disconnect(self, device_id: str):
-        """Remove a device connection."""
         if device_id in self._heartbeat_tasks:
             self._heartbeat_tasks[device_id].cancel()
             del self._heartbeat_tasks[device_id]
@@ -60,14 +60,12 @@ class ConnectionManager:
         logger.info(
             f"Device disconnected: {device_info.get('name', 'unknown')} ({device_id})"
         )
-
         await self.broadcast(
             {"type": "device_disconnected", "device_id": device_id},
             exclude=device_id,
         )
 
     async def broadcast(self, message: dict, exclude: str | None = None):
-        """Send a message to all connected devices, optionally excluding one."""
         payload = json.dumps(message)
         disconnected = []
         for device_id, ws in self.active_connections.items():
@@ -77,12 +75,10 @@ class ConnectionManager:
                 await ws.send_text(payload)
             except Exception:
                 disconnected.append(device_id)
-
         for device_id in disconnected:
             await self.disconnect(device_id)
 
     async def send_to_device(self, device_id: str, message: dict):
-        """Send a message to a specific device."""
         ws = self.active_connections.get(device_id)
         if ws:
             try:
@@ -91,7 +87,6 @@ class ConnectionManager:
                 await self.disconnect(device_id)
 
     async def _heartbeat(self, device_id: str):
-        """Send periodic pings to keep the connection alive."""
         try:
             while device_id in self.active_connections:
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
@@ -106,7 +101,6 @@ class ConnectionManager:
             pass
 
     def get_connected_devices(self) -> list[dict]:
-        """Return a list of currently connected devices."""
         devices = []
         for device_id, info in self.paired_devices.items():
             if device_id in self.active_connections:
@@ -131,8 +125,16 @@ async def websocket_endpoint(
     manager: ConnectionManager,
     clipboard_monitor,
     file_manager,
+    pairing_manager,
 ):
-    """Handle a WebSocket connection for a device."""
+    """Handle a WebSocket connection for a device. Validates the shared token first."""
+    token = websocket.query_params.get("token")
+    if pairing_manager and not pairing_manager.validate_token(token):
+        # Reject before accept; client sees handshake failure.
+        await websocket.close(code=4401)
+        logger.warning(f"WS rejected (bad token) for {device_id}")
+        return
+
     device_name = websocket.query_params.get("device_name", "Unknown")
     device_type = websocket.query_params.get("device_type", "phone")
 
@@ -149,7 +151,6 @@ async def websocket_endpoint(
             msg_type = data.get("type")
 
             if msg_type == "pong":
-                # Heartbeat response, ignore
                 continue
 
             elif msg_type == "ping":
@@ -170,10 +171,26 @@ async def websocket_endpoint(
                 )
 
             elif msg_type == "text_share":
+                content = data.get("content", "")
+                # Also push to the PC clipboard so the Share tab actually
+                # delivers something to the host without requiring an open
+                # browser tab on the PC.
+                if content and clipboard_monitor:
+                    try:
+                        await clipboard_monitor.set_clipboard(content)
+                    except Exception as e:
+                        logger.warning(f"text_share clipboard push failed: {e}")
+                if content and manager.db is not None:
+                    try:
+                        manager.db.add_feed("text", content, device_id)
+                    except Exception as e:
+                        logger.warning(f"feed persist failed: {e}")
+                if content:
+                    notify.push_text(content, device_id)
                 await manager.broadcast(
                     {
                         "type": "text_share",
-                        "content": data.get("content", ""),
+                        "content": content,
                         "from": device_id,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     },
@@ -187,6 +204,7 @@ async def websocket_endpoint(
                         "filename": data.get("filename", ""),
                         "size": data.get("size", 0),
                         "url": data.get("url", ""),
+                        "thumb_url": data.get("thumb_url"),
                         "from": device_id,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     },

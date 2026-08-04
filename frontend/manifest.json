@@ -4,8 +4,8 @@
   "description": "Sync files, clipboard, and more between your PC and phone",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0a0a0f",
-  "theme_color": "#ff4444",
+  "background_color": "#0c0a07",
+  "theme_color": "#d9a14a",
   "orientation": "portrait",
   "icons": [
     {
@@ -18,5 +18,21 @@
       "sizes": "512x512",
       "type": "image/png"
     }
-  ]
+  ],
+  "share_target": {
+    "action": "/api/share-target",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url",
+      "files": [
+        {
+          "name": "files",
+          "accept": ["image/*", "video/*", "audio/*", "text/*", "application/*", "*/*"]
+        }
+      ]
+    }
+  }
 }

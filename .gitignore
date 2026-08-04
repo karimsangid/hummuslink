@@ -9,3 +9,14 @@ node_modules/
 *.pyo
 .venv/
 venv/
+.pytest_cache/
+
+# Scratch fixtures left over from manual thumbnail/upload-limit testing.
+# Nothing in the codebase references them; kept on disk, out of the repo.
+big.jpg
+o.jpg
+nearly.png
+trunc.png
+thumb_under.jpg
+bomb_over.png
+bomb_under.png
